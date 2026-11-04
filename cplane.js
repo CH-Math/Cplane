@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Christian Henriksen
  * All rights reserved.
- * Last updated 2026-11-03
+ * Last updated 2026-11-04
  *
  * Inspired by PPlane, but written from scratch.
  *
@@ -1254,64 +1254,129 @@ let cplane = new function() {
 
 
 
-    function initDynSys(xVarTxt, yVarTxt, paramTxt, fExprTxt, gExprTxt, paramExprTxt) {
+    /* Words that cannot be used as parameter names.
+     *
+     * Three groups, three different reasons:
+     *  - JavaScript keywords and built-ins: `let class = 1` is a syntax error.
+     *  - Identifiers the generated function uses itself: a parameter named `fx`
+     *    would clash with the `let fx = ...` line.
+     *  - Names the lexer tokenises before it looks for variables: "pi" becomes
+     *    a number and "sin", "cos", "tan", "exp", "log" become functions, so a
+     *    parameter with one of those names could be declared but never used.
+     */
+    const RESERVED_NAMES = new Set([
+        "let", "const", "var", "function", "return", "new", "class", "this",
+        "if", "else", "for", "while", "do", "switch", "case", "default",
+        "break", "continue", "try", "catch", "finally", "throw", "typeof",
+        "instanceof", "in", "of", "delete", "void", "yield", "await", "super",
+        "extends", "import", "export", "with", "debugger", "null", "true",
+        "false", "undefined", "arguments", "eval", "NaN", "Infinity", "Math",
+        "fx", "fy",
+        "pi", "sin", "cos", "tan", "exp", "log"
+    ]);
+
+    /* Names in an expression that are not available where it is evaluated.
+     * These are reported by name, so that "b is used before it is declared"
+     * does not disguise itself as "cannot evaluate the vector field".
+     */
+    function unboundNames( expr, allowed ) {
+        return [...expr.varNames()].filter( function( name ) {
+            return !allowed.has( name );
+        });
+    }
+
+    function initDynSys(xVarTxt, yVarTxt, params, fExprTxt, gExprTxt) {
         expressionOkay = false;
-        let fExpr = lexAndParse(fExprTxt);
-        let gExpr = lexAndParse(gExprTxt);
-        let paramExpr = lexAndParse(paramExprTxt);
 
-        /* Here's the slow way:
-        f = function( [px, py] ) {
-            let store = new Map([
-                [xVarTxt, px],
-                [yVarTxt, py]
-            ]);
-            let paramVal = paramExpr.eval(store);
-            store.set(paramTxt, paramVal);
-            let fx = fExpr.eval(store); 
-            let fy = gExpr.eval(store);
-            return [fx, fy];
-        };
-        */
-
-        // We "compile" the expression into a JavaScript function
-        f = new Function( 
-            `return function([${xVarTxt},${yVarTxt}]) {
-            let ${paramTxt}=${paramExpr};
-            let fx = ${fExpr};
-            let fy = ${gExpr};
-            return [fx, fy]; }`)();
-
-        // Since Function is a bit sketchy, we perform some tests to see if the expressions are
-        // reasonable:
-        // the parameter must only depend on x and y
+        if (!Array.isArray(params) || params.length === 0) {
+            throw "At least one parameter is required.";
+        }
         if (xVarTxt == yVarTxt) {
             throw "The two dynamical variables must have different names!";
         }
-        if (paramTxt == xVarTxt || paramTxt == yVarTxt) {
-            throw "The parameter must not be called the same as a variable.";
+
+        /* The names available to an expression at each step. Slot i may use x,
+         * y, and the parameters declared before it. The order of the rows is
+         * therefore the order of evaluation, and a cycle is impossible without
+         * needing a dependency analysis.
+         */
+        let allowed = new Set([xVarTxt, yVarTxt]);
+        let declarations = [];
+
+        for (let i = 0; i < params.length; i++) {
+            let name = String(params[i].name);
+            let exprTxt = String(params[i].expr);
+
+            if (name == xVarTxt || name == yVarTxt) {
+                throw "The parameter must not be called the same as a variable: '"
+                    + name + "'";
+            }
+            if (!name.match(/^[a-zA-Z][a-zA-Z0-9]*$/)) {
+                throw "A parameter name is not legal: '" + name + "'";
+            }
+            if (RESERVED_NAMES.has(name)) {
+                throw "The name '" + name + "' is reserved and cannot be "
+                    + "used as a parameter.";
+            }
+            if (allowed.has(name)) {
+                throw "The parameter name '" + name + "' is used twice.";
+            }
+
+            let expr = lexAndParse(exprTxt);
+            let unbound = unboundNames(expr, allowed);
+            if (unbound.length > 0) {
+                throw "The value of '" + name + "' uses "
+                    + (unbound.length === 1 ? "a name that is" : "names that are")
+                    + " not defined before it: " + unbound.join(", ")
+                    + ". Parameters are evaluated from the first row down.";
+            }
+            declarations.push("let " + name + " = " + expr + ";");
+            allowed.add(name);
         }
-        if (new Set([xVarTxt, yVarTxt,...paramExpr.varNames()]).size > 2) {
-            throw "The paramter must only depend on the dynamical variables";
+
+        let fExpr = lexAndParse(fExprTxt);
+        let gExpr = lexAndParse(gExprTxt);
+
+        let unboundF = unboundNames(fExpr, allowed);
+        if (unboundF.length > 0) {
+            throw "There " + (unboundF.length === 1 ? "is an unbound variable" : "are unbound variables")
+                + " in the equation for " + xVarTxt + ": " + unboundF.join(", ");
         }
-        if (new Set(
-            [xVarTxt, 
-                yVarTxt,
-                paramTxt,
-                ...fExpr.varNames()
-            ]).size > 3) {
-            throw "There's an unbound variable "
-                + "in the expression for the first variable.";
+        let unboundG = unboundNames(gExpr, allowed);
+        if (unboundG.length > 0) {
+            throw "There " + (unboundG.length === 1 ? "is an unbound variable" : "are unbound variables")
+                + " in the equation for " + yVarTxt + ": " + unboundG.join(", ");
         }
-        if (new Set(
-            [xVarTxt, 
-                yVarTxt,
-                paramTxt,
-                ...gExpr.varNames()
-            ]).size > 3) {
-            throw "There's an unbound variable "
-                + "in the expression for the second variable.";
+
+        /* Here's the slow way, kept as a reference in case building source
+         * becomes a problem:
+         *   f = function( [px, py] ) {
+         *       let store = new Map([[xVarTxt, px], [yVarTxt, py]]);
+         *       for each parameter, in order: store.set(name, expr.eval(store));
+         *       return [fExpr.eval(store), gExpr.eval(store)];
+         *   };
+         * The row order is what makes that loop correct as well.
+         */
+
+        // We "compile" the expression into a JavaScript function.
+        // The declarations are emitted in row order, so a parameter may use the
+        // ones above it. Anything that still fails here is something the checks
+        // above did not anticipate (a reserved word, say), and it is reported as
+        // such rather than as a mysterious failure to evaluate.
+        let source = "return function([" + xVarTxt + ", " + yVarTxt + "]) {\n"
+            + declarations.map(function(d) { return "    " + d; }).join("\n") + "\n"
+            + "    let fx = " + fExpr + ";\n"
+            + "    let fy = " + gExpr + ";\n"
+            + "    return [fx, fy];\n"
+            + "}";
+        let compiled;
+        try {
+            compiled = new Function(source)();
         }
+        catch (err) {
+            throw "Could not compile the vector field: " + err.message;
+        }
+        f = compiled;
 
         try {
             f([xmin, ymin]);
@@ -1572,10 +1637,9 @@ let cplane = new function() {
             textOutElement, 
             xVarTxt,
             yVarTxt,
-            paramTxt,
+            params,
             fExprTxt,
             gExprTxt,
-            paramExprTxt,
             region,
             titleTxtArg ) {
         xmin = region.xmin;
@@ -1600,7 +1664,7 @@ let cplane = new function() {
         pixHeight = (ymax - ymin) / height;
         portrait = portraitElem.getContext("2d");
 
-        initDynSys(xVarTxt, yVarTxt, paramTxt, fExprTxt, gExprTxt, paramExprTxt); 
+        initDynSys(xVarTxt, yVarTxt, params, fExprTxt, gExprTxt); 
 
         portrait.clearRect(0, 0, portraitElem.width, portraitElem.height);
         drawTitle();

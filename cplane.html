@@ -43,7 +43,10 @@
                 where<br>
                 <input style="text-align:right;" type="text" name="param" size=3 value="a">
                 =
-                <input type="text" name="paramval" value="0.5"><br>
+                <input type="text" name="paramval" value="0.5">,
+                <input style="text-align:right;" type="text" name="param2" size=3 value="">
+                =
+                <input type="text" name="paramval2" value=""><br>
 
 
                 <h2>Window</h2>
@@ -98,15 +101,40 @@
 
 
                 /* Saving and loading */
+
+                /* The two parameter rows, in the order they are evaluated.
+                 * A row counts as used if either of its two fields has content.
+                 * An empty second row is normal; an empty first row is not, and
+                 * is rejected on submit rather than here.
+                 */
+                function slot_values(form) {
+                    return [
+                        [form.elements.param.value.trim(),
+                         form.elements.paramval.value.trim()],
+                        [form.elements.param2.value.trim(),
+                         form.elements.paramval2.value.trim()]
+                    ];
+                }
+
+                function used_slots(form) {
+                    return slot_values(form)
+                        .filter(function(slot) {
+                            return slot[0] !== "" || slot[1] !== "";
+                        })
+                        .map(function(slot) {
+                            return { "name": slot[0], "expr": slot[1] };
+                        });
+                }
+
                 function get_info(form) {
                     let sysName = form.elements.sysname.value;
                     let sysInfo = {
+                        "version" : 1,
                         "var1" : form.elements.var1.value,
                         "var2" : form.elements.var2.value,
-                        "param" : form.elements.param.value,
+                        "params" : used_slots(form),
                         "expr1" : form.elements.expr1.value,
                         "expr2" : form.elements.expr2.value,
-                        "paramExpr" : form.elements.paramval.value,
                         "xmin" : form.elements.xmin.value,
                         "xmax" : form.elements.xmax.value,
                         "ymin" : form.elements.ymin.value,
@@ -115,13 +143,42 @@
                     return [sysName, sysInfo];
                 };
 
+                /* Reads both formats: "params" (version 1, since 2026-11-04) and
+                 * the single "param"/"paramExpr" pair written before that. */
+                function read_params(info) {
+                    let params;
+                    if (Array.isArray(info.params)) {
+                        params = info.params;
+                    } else if (info.param !== undefined) {
+                        params = [{ "name": info.param, "expr": info.paramExpr }];
+                    } else {
+                        params = [];
+                    }
+                    /* Always return exactly two rows. A system with one parameter
+                     * must clear the second row: otherwise the value left over
+                     * from the previously loaded system keeps running unseen.
+                     */
+                    let rows = [];
+                    for (let i = 0; i < 2; i++) {
+                        let p = params[i];
+                        rows.push({
+                            "name" : (p && p.name) ? p.name : "",
+                            "expr" : (p && p.expr) ? p.expr : ""
+                        });
+                    }
+                    return rows;
+                }
+
                 function set_info(form, info) {
                     form.elements.var1.value = info.var1;
                     form.elements.var2.value = info.var2;
-                    form.elements.param.value = info.param;
                     form.elements.expr1.value = info.expr1;
                     form.elements.expr2.value = info.expr2;
-                    form.elements.paramval.value = info.paramExpr;
+                    let rows = read_params(info);
+                    form.elements.param.value = rows[0].name;
+                    form.elements.paramval.value = rows[0].expr;
+                    form.elements.param2.value = rows[1].name;
+                    form.elements.paramval2.value = rows[1].expr;
                     form.elements.xmin.value = info.xmin;
                     form.elements.xmax.value = info.xmax;
                     form.elements.ymin.value = info.ymin;
@@ -165,10 +222,9 @@
                     document.getElementById("range2name").innerHTML = form.elements.var2.value;
                     let var1 = form.elements.var1.value;
                     let var2 = form.elements.var2.value;
-                    let param = form.elements.param.value;
                     let expr1 = form.elements.expr1.value;
                     let expr2 = form.elements.expr2.value;
-                    let paramExpr = form.elements.paramval.value;
+                    let slots = slot_values(form);
                     let xmin = Number(form.elements.xmin.value);
                     let xmax = Number(form.elements.xmax.value);
                     let ymin = Number(form.elements.ymin.value);
@@ -190,10 +246,36 @@
                     try {
                         formOK = false; // until proven otherwise
                         // are variable names legal?
-                        if (!var1.match(/^[a-zA-Z][a-zA-z0-9]*$/)
-                            || !var2.match(/^[a-zA-Z][a-zA-z0-9]*$/)
-                            || !param.match(/^[a-zA-Z][a-zA-z0-9]*$/) ) {
+                        if (!var1.match(/^[a-zA-Z][a-zA-Z0-9]*$/)
+                            || !var2.match(/^[a-zA-Z][a-zA-Z0-9]*$/) ) {
                             throw "A variable name is not legal";
+                        }
+                        // The parameter rows. The first is required, the second
+                        // is optional. A row with a value but no name is an
+                        // ambiguity, not an empty row: say so instead of quietly
+                        // dropping what the user typed.
+                        let params = [];
+                        for (let i = 0; i < slots.length; i++) {
+                            let name = slots[i][0];
+                            let expr = slots[i][1];
+                            if (name === "" && expr === "") {
+                                if (i === 0) {
+                                    throw "The first parameter is required. "
+                                        + "Use a dummy such as a = 1 if the system has none.";
+                                }
+                                continue; // an empty second row is fine
+                            }
+                            if (name === "") {
+                                throw "Parameter " + (i + 1) + " has a value ('"
+                                    + expr + "') but no name.";
+                            }
+                            if (!name.match(/^[a-zA-Z][a-zA-Z0-9]*$/)) {
+                                throw "A parameter name is not legal: '" + name + "'";
+                            }
+                            if (expr === "") {
+                                throw "The parameter '" + name + "' has no value.";
+                            }
+                            params.push({ "name": name, "expr": expr });
                         }
                         // is the window reasonable?
                         if (!(xmin<xmax) || !(ymin<ymax)) {
@@ -204,10 +286,9 @@
                             textOutElem,
                             var1,
                             var2, 
-                            param,
+                            params,
                             expr1, 
                             expr2,
-                            paramExpr,
                             { "xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax },
                             form.elements.sysname.value
                         );
@@ -227,5 +308,5 @@
             
         </div>
 
-        <footer>Last updated 2026-11-03 Christian Henriksen</footer>
+        <footer>Last updated 2026-11-04 Christian Henriksen</footer>
     </body>

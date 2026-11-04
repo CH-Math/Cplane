@@ -1321,6 +1321,25 @@ let cplane = new function() {
             + ", "
             + equi[1].toPrecision(significantDigits()).toString() + ").");
 
+        if (zeroSet.nonLinear) {
+            // The Jacobian is not zero, but it describes the field only in a
+            // neighbourhood far smaller than a pixel. Which type it gives then
+            // depends on where in that neighbourhood the search happened to
+            // stop. For x'=x², y'=-y² the four quadrants gave a saddle, a
+            // stable node, an unstable node and a saddle again -- all at the
+            // same point. Reporting a type would be reporting the rounding, so
+            // none is reported.
+            logTxt("It is non-hyperbolic, and the linear part does not"
+                + " describe the field here: across one pixel the field"
+                + " changes far more than the Jacobian can account for. No"
+                + " type follows from the linearisation.");
+            portrait.strokeStyle = Wong.black;
+            portrait.lineWidth = 1.5;
+            drawTools.ring_xy(equi, 5);
+            portrait.lineWidth = 1;
+            return;
+        }
+
         switch (equiInfo.type) {
             case "Saddle":
                 logTxt("It's a saddle.")
@@ -1432,12 +1451,6 @@ let cplane = new function() {
                 portrait.strokeStyle=Wong.black;
                 portrait.fillStyle=Wong.black;
                 drawTools.circle_xy( equi, 3 );
-        }
-
-        if (zeroSet.nonLinear && equiInfo.type !== "NonHyperbolic") {
-            logTxt("Careful: across one pixel the field changes far more than"
-                + " this linearisation accounts for, so the label above says"
-                + " little about what happens at the size of the picture.");
         }
 
     }

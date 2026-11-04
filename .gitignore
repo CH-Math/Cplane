@@ -1,0 +1,6 @@
+# Lokale noter og hjælpeværktøjer — holdes uden for versionskontrol.
+# Ikke fordi de er hemmelige, men fordi de er arbejdsredskaber der ændrer sig
+# konstant og ikke hører til selve programmet.
+TODO.md
+typografi-plan.md
+checkbalance.py

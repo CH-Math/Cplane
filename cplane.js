@@ -1208,6 +1208,43 @@ let cplane = new function() {
         return { kind: "point", nonLinear: nonLinear };
     }
 
+    /* Following the zero set.
+
+     A straight segment along the tangent is a poor picture of a curve of
+     equilibria. The parabola x = y² turns sharply near its vertex, and a
+     30 pixel chord leaves the curve by several pixels at each end — so
+     clicking up through a bend draws segments that cross each other.
+
+     Instead, walk the zero set: step along the tangent, then pull the point
+     back onto the zero set with Newton. On a curve that lands a little
+     further along it, and the next step uses the direction actually walked,
+     not the tangent at the start.
+
+     The walk stops as soon as the search comes back to where it started, or
+     barely moves, which is what happens past the end of the zero set.
+     */
+    function traceZeroCurve(start, dir, pixLen, DfFn) {
+        const stepPx = 2;
+        const step = stepPx*pixWidth;
+        const n = Math.max(1, Math.round(pixLen/stepPx));
+        let pts = [];
+        let p = start;
+        let d = dir;
+        for (let k = 0; k < n; k++) {
+            let q = mat22.newtonSolve(f, DfFn,
+                mat22.vectorAdd(p, mat22.scalarMul(step, d)));
+            if (q === null) { break; }
+            let chord = mat22.vectorSub(q, p);
+            let len = mat22.vectorNorm(chord);
+            if (!(len > 0.5*step)) { break; }        // no curve out there
+            if (!(mat22.dot(chord, d) > 0)) { break; } // went backwards
+            d = mat22.scalarMul(1/len, chord);
+            p = q;
+            pts.push(p);
+        }
+        return pts;
+    }
+
     function searchEquilibrium(e) {
         // Search and classify equilibrium
         // First search
@@ -1259,12 +1296,18 @@ let cplane = new function() {
                     ? "Nearby orbits approach the curve."
                     : "Nearby orbits move away from the curve.");
             }
-            let arm = mat22.scalarMul(30*pixWidth, zeroSet.dir);
+            // Draw the curve by following it, not by drawing its tangent.
+            let back = traceZeroCurve(equi,
+                [-zeroSet.dir[0], -zeroSet.dir[1]], 30, Df);
+            let fwd = traceZeroCurve(equi, zeroSet.dir, 30, Df);
+            let line = back.slice().reverse().concat([equi], fwd);
             portrait.strokeStyle = Wong.black;
             portrait.lineWidth = 2;
             portrait.beginPath();
-            drawTools.moveTo_xy(mat22.vectorSub(equi, arm));
-            drawTools.lineTo_xy(mat22.vectorAdd(equi, arm));
+            drawTools.moveTo_xy(line.length > 0 ? line[0] : equi);
+            for (let k = 0; k < line.length; k++) {
+                drawTools.lineTo_xy(line[k]);
+            }
             portrait.stroke();
             portrait.lineWidth = 1;
             return;

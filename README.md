@@ -31,4 +31,7 @@ It is distributed in the hope that it will be useful, but WITHOUT ANY
 WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
 A PARTICULAR PURPOSE.
 
+The background image, `hearts3.png`, is original work by the author and is
+covered by the same licence.
+
 See [LICENSE](LICENSE) for the full text of the licence.

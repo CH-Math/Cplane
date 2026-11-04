@@ -653,22 +653,39 @@ let cplane = new function() {
             return [vx/(50+vLength), vy/(50+vLength) ];
         };
 
- 
+
         /* Matrices.
 
          */
 
+        // Frobenius norm of a matrix, i.e. the length of the 4 entries as a
+        // vector. Used for comparing matrices across systems without caring
+        // about the overall scaling of the vector field.
+        this.matrixNorm = function([a11, a21, a12, a22]) {
+            return Math.sqrt(a11*a11 + a21*a21 + a12*a12 + a22*a22);
+        };
+
         // Jacobi matrix is found by numerical differentiation
         this.jacobiMat = function(f) {
-            let eps = 10e-5;
+            const relStep = 1e-4;                          // of a pixel
+            const roundoff = Math.sqrt(Number.EPSILON);    // ≈ 1.5e-8
             function Df(u) {
-                let v1 = f(mat22.vectorAdd(u, [eps*pixWidth, 0]));
-                let v2 = f(mat22.vectorSub(u, [eps*pixWidth, 0]));
-                let r1 = mat22.scalarMul(0.5/(eps*pixWidth),
+                // A step proportional to a pixel keeps the truncation error a
+                // fixed fraction of what we can draw. The floor keeps the
+                // difference from being swamped by roundoff when the window is
+                // small: central differences carry an error of order ε/h, and
+                // the search is asked for a finer answer precisely when zoomed
+                // in, so the step cannot be allowed to follow the zoom down
+                // without limit.
+                let hx = Math.max(relStep*pixWidth, roundoff*(Math.abs(u[0]) + 1));
+                let hy = Math.max(relStep*pixHeight, roundoff*(Math.abs(u[1]) + 1));
+                let v1 = f(mat22.vectorAdd(u, [hx, 0]));
+                let v2 = f(mat22.vectorSub(u, [hx, 0]));
+                let r1 = mat22.scalarMul(0.5/hx,
                     mat22.vectorSub(v1, v2));
-                let w1 = f(mat22.vectorAdd(u, [0, eps*pixHeight]));
-                let w2 = f(mat22.vectorSub(u, [0, eps*pixHeight]));
-                let r2 = mat22.scalarMul(0.5/(eps*pixHeight),
+                let w1 = f(mat22.vectorAdd(u, [0, hy]));
+                let w2 = f(mat22.vectorSub(u, [0, hy]));
+                let r2 = mat22.scalarMul(0.5/hy,
                     mat22.vectorSub(w1, w2));
                 return r1.concat(r2);
             }
@@ -676,12 +693,24 @@ let cplane = new function() {
         };
 
         this.solveMatVecEq = function(A, [y1, y2]) {
-            // Solve Ax = y
-            // We pick largest element in first column and reduce
+            // Solve Ax = y by elimination, pivoting on the largest element in
+            // the first column.
+            //
+            // Returns null when A is singular to working precision. The caller
+            // then takes a damped step (leastSquaresStep) instead of receiving
+            // Infinity or NaN, which is what used to happen: a zero pivot made
+            // the whole result NaN and the search gave up without a word.
             let [a11, a21, a12, a22] = A;
-            if (Math.abs(a11) > Math.abs(a21)) {
+            let scale = Math.max(Math.abs(a11), Math.abs(a21),
+                                 Math.abs(a12), Math.abs(a22));
+            if (scale === 0) { return null; }
+            let tolPivot = 1e-12 * scale;
+
+            if (Math.abs(a11) >= Math.abs(a21)) {
                 // largest element is in first row
+                if (Math.abs(a11) <= tolPivot) { return null; }
                 let r1 = a22 - a21/a11*a12;
+                if (Math.abs(r1) <= tolPivot) { return null; }
                 let yy2 = y2 - a21/a11*y1;
                 let x2 = yy2/r1;
                 let x1 = (y1 - a12*x2) / a11;
@@ -689,28 +718,83 @@ let cplane = new function() {
             };
 
             // largest element is in second row 
+            if (Math.abs(a21) <= tolPivot) { return null; }
             let r1 = a12 - a11/a21*a22;
+            if (Math.abs(r1) <= tolPivot) { return null; }
             let yy1 = y1 - a11/a21*y2;
             let x2 = yy1/r1;
             let x1 = (y2 - a22*x2)/ a21;
             return [x1, x2];
         };
 
-        this.newtonSolve = function(f, Df, v0, tol=1e-10, giveup=v=>false) {
+        this.leastSquaresStep = function(A, [y1, y2]) {
+            // The damped least squares step: the x minimising
+            //     ‖A x − y‖² + μ‖x‖²,     μ = 1e-8·(largest entry of A)²
+            // from the normal equations (AᵀA + μI)x = Aᵀy.
+            //
+            // This is the fallback when A is singular. For a singular but
+            // consistent system — the line of equilibria of x'=0, y'=-y — it
+            // reproduces the solution Newton would have found, and for a
+            // singular inconsistent one it at least gives a bounded direction
+            // instead of a division by zero.
+            let [a11, a21, a12, a22] = A;
+            let scale = Math.max(Math.abs(a11), Math.abs(a21),
+                                 Math.abs(a12), Math.abs(a22));
+            if (scale === 0) { return [0, 0]; } // A = 0: no direction to step in
+
+            let mu = 1e-8 * scale * scale;
+            // A is given in column major order, so the rows are (a11,a12) and
+            // (a21,a22).
+            let b11 = a11*a11 + a21*a21 + mu;
+            let b12 = a11*a12 + a21*a22;
+            let b22 = a12*a12 + a22*a22 + mu;
+            let c1 = a11*y1 + a21*y2;
+            let c2 = a12*y1 + a22*y2;
+            let det = b11*b22 - b12*b12; // ≥ μ², so never zero
+
+            return [(b22*c1 - b12*c2)/det, (b11*c2 - b12*c1)/det];
+        };
+
+        this.newtonSolve = function(f, Df, v0, tol, giveup, residualTol) {
             // Solve f(x) = 0, with starting guess v0
             // Df is the Jacobi matrix of f
+            // tol is the largest correction we accept as "done", measured in
+            //   the units of v0. The default is a tenth of a pixel.
             // giveup(v) should be true if algorithm should give up
-            let maxIt = 100;
-            let it = 0;
+            // residualTol is how small f itself must get. If it is not given
+            //   we ask for a large relative improvement on the residual at v0.
+            //
+            // Success needs two things: the correction is below tol, and the
+            // residual is small. Both matter. A singular Jacobian makes the
+            // correction zero without getting anywhere, and a field that is
+            // merely small would pass a residual test on its own. The default
+            // residual test is a ratio on purpose: scaling the whole vector
+            // field by a constant leaves the equilibria where they were and
+            // must not change the answer, whereas an absolute threshold let a
+            // system multiplied by 1e-9 report every clicked point as an
+            // equilibrium. A caller whose residual is itself a distance — the
+            // cycle search — passes an absolute tolerance instead.
+            if (tol === undefined) { tol = equilibriumTolPx*pixWidth; }
+            if (giveup === undefined) { giveup = v => false; }
+            const maxIt = 100;
+
+            let startResidual = mat22.vectorNorm(f(v0));
+            if (residualTol === undefined) {
+                residualTol = 1e-6*startResidual;
+            }
             let guess = v0;
-            let newguess = guess;
+            let it = 0;
             while (it < maxIt) {
                 it++;
 
-                newguess = mat22.vectorSub(
-                    guess, 
-                    mat22.solveMatVecEq(Df(guess), f(guess))
-                );
+                let value = f(guess);
+                let step = mat22.solveMatVecEq(Df(guess), value);
+                if (step === null) {
+                    // Singular Jacobian: no Newton step exists.
+                    step = mat22.leastSquaresStep(Df(guess), value);
+                }
+                let newguess = mat22.vectorSub(guess, step);
+
                 // we give up on NaN or inf
                 if (!Number.isFinite(newguess[0]) 
                     || !Number.isFinite(newguess[1])) {
@@ -722,15 +806,15 @@ let cplane = new function() {
                 }
 
                 // Have we found a zero ?
-                if (mat22.vectorNorm(f(guess)) <= tol
-                   && mat22.vectorNorm(mat22.vectorSub(guess, newguess)) <= tol) {
+                if (mat22.vectorNorm(mat22.vectorSub(guess, newguess)) <= tol
+                   && mat22.vectorNorm(value) <= residualTol) {
                     return newguess;
                 }
 
                 guess = newguess;
             }
 
-            if (mat22.vectorNorm(f(guess)) <= tol) {
+            if (mat22.vectorNorm(f(guess)) <= residualTol) {
                 return guess;
             }
 
@@ -742,18 +826,22 @@ let cplane = new function() {
         function eigenVec([a11, a21, a12, a22], lam) {
             // find eigenvector corresponding to eigenval lam
             // Assumes lam is an eigenvalue
-            let [b11, b21, b12, b22] = [a11-lam, a21, a12, a22];
+            // Both diagonal entries carry the shift. Missing it on a22 leaves
+            // the second row independent of lam, so when the second row was the
+            // one used, both eigenvalues produced the same direction.
+            let [b11, b21, b12, b22] = [a11-lam, a21, a12, a22-lam];
             
-            // The rows are proportional. We determine the eigen vector from
-            // row with biggest entries.
+            // The rows are proportional, so either one determines the
+            // eigenvector. Use the row with the bigger entries: rounding
+            // matters more when the row is small. Comparing rows entry by
+            // entry is wrong — (-1, 0) is not "smaller than" (0, -2) — so
+            // compare their lengths.
+            let r1 = b11*b11 + b12*b12;
+            let r2 = b21*b21 + b22*b22;
             let v;
-            if (Math.abs(b11) >= Math.abs(b12) &&
-                Math.abs(b11) >= Math.abs(b21) ||
-                Math.abs(b12) >= Math.abs(b22)) {
-                // first row is biggest
+            if (r1 >= r2) {
                 v = [-b12, b11];
             } else {
-                // second row is biggest
                 v = [-b22, b21];
             }
 
@@ -774,17 +862,30 @@ let cplane = new function() {
             let Discr = tau*tau-4*Delta;
             const tol = 1e-5; // for determining numerically equal to zero
 
+            // The thresholds below are compared against the entries of the
+            // Jacobian scaled to largest entry 1. Without that, the same
+            // system multiplied by a constant would be classified differently:
+            // Delta carries two factors of the scaling and tau one, while tol
+            // is a hard number. The original scale is kept for the eigenvalues
+            // themselves.
+            let scale = Math.max(Math.abs(Dfx011), Math.abs(Dfx021),
+                                 Math.abs(Dfx012), Math.abs(Dfx022));
+            let s = (scale > 0) ? 1/scale : 1;
+            let DeltaN = Delta * s * s;
+            let tauN = tau * s;
+            let DiscrN = Discr * s * s;
+
             // Determine stability
-            if (Delta > tol && tau < -tol) {
+            if (DeltaN > tol && tauN < -tol) {
                 equiInfo.stability = "stable";
-            } else if (Delta < -tol || tau > tol) {
+            } else if (DeltaN < -tol || tauN > tol) {
                 equiInfo.stability = "unstable";
             } else {
                 equiInfo.stability = "unknown";
             }
 
-            if ( Math.abs(Delta) <= tol ) {
-                if (Math.abs(tau) <= tol ) {
+            if ( Math.abs(DeltaN) <= tol ) {
+                if (Math.abs(tauN) <= tol ) {
                     equiInfo.type = "NonHyperbolic";
                     return equiInfo;
                 }
@@ -795,7 +896,7 @@ let cplane = new function() {
                 return equiInfo;
             }
 
-            if (Delta < 0) {
+            if (DeltaN < 0) {
                 // Saddle
                 equiInfo.type = "Saddle";
                 let lam1 = 0.5*(tau-Math.sqrt(Discr));
@@ -805,8 +906,8 @@ let cplane = new function() {
                 return equiInfo;
             }
 
-            if (Discr < -tol ) {
-                if (Math.abs(tau) > tol) {
+            if (DiscrN < -tol ) {
+                if (Math.abs(tauN) > tol) {
                 // Focus
                     equiInfo.type = "Focus";
                     return equiInfo;
@@ -847,6 +948,14 @@ let cplane = new function() {
             portrait.beginPath();
             portrait.arc(vec_ij[0], vec_ij[1], rad, 0, 2*Math.PI, false);
             portrait.fill();
+            portrait.stroke();
+        },
+
+        // An unfilled circle, for marking something that is not a point.
+        "ring_xy": function(vec_xy, rad) {
+            let vec_ij = xy2pix( vec_xy[0], vec_xy[1] );
+            portrait.beginPath();
+            portrait.arc(vec_ij[0], vec_ij[1], rad, 0, 2*Math.PI, false);
             portrait.stroke();
         },
 
@@ -980,6 +1089,125 @@ let cplane = new function() {
         integrateOnClick(e);
     }
 
+    /* Fixed point search.
+
+     equilibriumTolPx is the search tolerance measured in pixels. The search is
+     done when the next correction is smaller than this, which ties the accuracy
+     to the picture: zooming in tightens the demand.
+
+     There is deliberately no separate threshold for "is this eigenvalue zero".
+     Such a threshold would have to be a judgement call, and both answers were
+     wrong in practice: x = y² has a curve of equilibria whose field grows like
+     h² along its own tangent, exactly as the degenerate isolated zero of
+     x'=x², y'=y does along its direction of weakness. No number separates
+     them. What does is looking for a second zero (see zeroSetKind).
+     */
+    const equilibriumTolPx = 0.1;
+
+    // The position is only worth as many digits as the tolerance supports.
+    function significantDigits() {
+        let d = Math.ceil(Math.log10((xmax - xmin)/(equilibriumTolPx*pixWidth)));
+        return Math.max(2, Math.min(6, d));
+    }
+
+    // A direction that the (singular) Jacobian maps to zero, found as the
+    // perpendicular of its longer row. Returns null when the whole Jacobian
+    // vanishes, in which case there is no distinguished direction.
+    function nullDirection(Df) {
+        let [a11, a21, a12, a22] = Df;
+        let row1 = [a11, a12];
+        let row2 = [a21, a22];
+        let row = (mat22.vectorNorm(row1) >= mat22.vectorNorm(row2)) ? row1 : row2;
+        let v = [-row[1], row[0]];
+        let n = mat22.vectorNorm(v);
+        if (n === 0) { return null; }
+        return mat22.scalarMul(1/n, v);
+    }
+
+    /* Is the zero set near p a point, a curve, or a region?
+
+     A point of the zero set tells us nothing about its neighbours on its own.
+     For x'=0, y'=0 every point of the plane is an equilibrium, and for
+     x'=0, y'=-y the equilibria fill the line y=0; in both cases reporting a
+     single point with five digits is worse than saying what is going on.
+
+     The test samples the field two pixels out. Along a direction where it
+     stays put, equilibria continue; that is decided relative to the largest
+     change the Jacobian could produce over the same distance, which makes the
+     test independent of the scaling of the field.
+     */
+    function zeroSetKind(p, Df, DfFn) {
+        const h = 2*pixWidth;
+        const probe = function(d) {
+            return Math.max(
+                mat22.vectorNorm(f(mat22.vectorAdd(p, mat22.scalarMul(h, d)))),
+                mat22.vectorNorm(f(mat22.vectorSub(p, mat22.scalarMul(h, d))))
+            );
+        };
+
+        let v = nullDirection(Df);
+        if (v === null) {
+            // The Jacobian vanishes at p. The field is stationary there, and
+            // it either vanishes over a neighbourhood or p is a degenerate
+            // isolated zero. Look further out than a couple of pixels: a zero
+            // of order two is invisible at that distance.
+            const r = 0.05*(xmax - xmin);
+            const diag = 1/Math.SQRT2;
+            const dirs = [[1, 0], [0, 1], [diag, diag], [diag, -diag]];
+            let vanishing = 0;
+            for (let i = 0; i < dirs.length; i++) {
+                if (Math.max(
+                    mat22.vectorNorm(f(mat22.vectorAdd(p, mat22.scalarMul(r, dirs[i])))),
+                    mat22.vectorNorm(f(mat22.vectorSub(p, mat22.scalarMul(r, dirs[i]))))
+                ) === 0) {
+                    vanishing++;
+                }
+            }
+            if (vanishing === dirs.length) {
+                return { kind: "region" };
+            }
+            return { kind: "point", nonLinear: true };
+        }
+
+        let across = [-v[1], v[0]];
+        // How large a change a generic direction would show over the probe
+        // distance. Zero only when the Jacobian is zero, which is handled
+        // above.
+        let ref = mat22.matrixNorm(Df)*h;
+
+        let alongAcross = probe(across);
+
+        // If the field changes far more across a couple of pixels than the
+        // Jacobian can account for, the linearisation describes almost none of
+        // what is going on here and the classification built on it is worth
+        // little. That is the case at a zero of order two, where the
+        // Jacobian vanishes while the field does not.
+        let nonLinear = alongAcross > 100*ref;
+
+        // Does the zero set continue? Probing along the null direction is not
+        // enough to answer that. A curve that bends, such as x = y², has a
+        // field growing like h² along its own tangent, and a degenerate
+        // isolated zero such as x'=x², y'=y does exactly the same along its
+        // direction of weakness: the two are indistinguishable along one ray.
+        //
+        // What separates them is whether there is another zero out there. So
+        // step a few pixels along the presumed direction and search from
+        // there. On a curve that lands on a different point of it; at an
+        // isolated zero the search comes back to p.
+        const reach = 3*pixWidth;
+        let there = mat22.newtonSolve(f, DfFn,
+            mat22.vectorAdd(p, mat22.scalarMul(reach, v)));
+        if (there !== null) {
+            let chord = mat22.vectorSub(there, p);
+            if (mat22.dot(chord, v) > 0.5*reach) {
+                let n = mat22.vectorNorm(chord);
+                return { kind: "curve", dir: mat22.scalarMul(1/n, chord) };
+            }
+        }
+
+        return { kind: "point", nonLinear: nonLinear };
+    }
+
     function searchEquilibrium(e) {
         // Search and classify equilibrium
         // First search
@@ -989,127 +1217,184 @@ let cplane = new function() {
         let Df = mat22.jacobiMat(f);
         let equi = mat22.newtonSolve(f, Df, pos);
 
-        // If we found an equilibrium, we classify it
-        if ( equi ) {
-            let equiInfo = mat22.classifyEquilibrium(Df(equi));
+        if (equi === null) {
+            // No word from the search is not the same as no answer. Say so.
+            logTxt("\nNo isolated equilibrium found near the click."
+                + " The field may vanish along a curve or over a region,"
+                + " or the search may have wandered away from the window.");
+            return;
+        }
 
-            logTxt("\nFound equilibrium point at " 
-                + "(" + equi[0].toPrecision(5).toString()
-                + ", "
-                + equi[1].toPrecision(5).toString() + ").");
+        // A second pass at a much tighter tolerance. The classification reads
+        // the Jacobian at the point, and whether an eigenvalue is zero or just
+        // small is decided by how close to the equilibrium we got: at a saddle
+        // node the linear part only looks degenerate within a hair of the
+        // point itself. If the refinement does not succeed we keep the first
+        // answer, which is already within tolerance.
+        let refined = mat22.newtonSolve(f, Df, equi,
+            1e-3*equilibriumTolPx*pixWidth);
+        if (refined !== null) { equi = refined; }
 
-            switch (equiInfo.type) {
-                case "Saddle":
-                    logTxt("It's a saddle.")
-                    portrait.strokeStyle=Wong.bluishGreen;
-                    portrait.fillStyle=Wong.bluishGreen;
-                    drawTools.circle_xy( equi, 2 );
+        let DfAtEqui = Df(equi);
+        let zeroSet = zeroSetKind(equi, DfAtEqui, Df);
 
-                    portrait.lineWidth=1.5;
+        if (zeroSet.kind === "region") {
+            logTxt("\nThe field appears to vanish over a whole neighbourhood of"
+                + " this point. Every point here is an equilibrium, so there is"
+                + " no isolated point to report.");
+            portrait.strokeStyle = Wong.black;
+            portrait.lineWidth = 1.5;
+            drawTools.ring_xy(equi, 6);
+            return;
+        }
 
-                    // Stable manifold
-                    let displacement =  mat22.scalarMul(0.1*pixWidth, equiInfo.stableDir);
-                    drawTools.integrate(
-                        mat22.vectorAdd(equi, displacement)
-                        , 10*width
-                        , -1
-                    );
-                    drawTools.integrate(
-                        mat22.vectorSub(equi, displacement)
-                        , 10*width
-                        , -1
-                    );
-
-                    // unstable manifold
-                    displacement =  mat22.scalarMul(0.5*pixWidth, equiInfo.unstableDir);
-
-                    drawTools.integrate(
-                        mat22.vectorAdd(equi, displacement)
-                        , 10*width
-                        , 1
-                    );
-                    drawTools.integrate(
-                        mat22.vectorSub(equi, displacement)
-                        , 10*width
-                        , 1
-                    );
-
-                    portrait.lineWidth=1;
-
-                    break;
-
-                case "SaddleNode":
-                    logTxt("It's (close to) non-hyperbolic, with 1D center manifold.")
-
-                    portrait.strokeStyle = Wong.bluishGreen;
-                    portrait.fillStyle = Wong.bluishGreen;
-                    portrait.lineWidth=1.5;
-
-                    // We draw the stable or unstable manifold
-                    // (and ignore the center one)
-                    let sign = (equiInfo.lam < 0) ? -1 : 1;
-                    let displ =  mat22.scalarMul(0.1*pixWidth, equiInfo.eigenvec);
-
-                    drawTools.integrate(
-                        mat22.vectorAdd(equi, displ)
-                        , 10*width
-                        , sign
-                    );
-                    drawTools.integrate(
-                        mat22.vectorSub(equi, displ)
-                        , 10*width
-                        , sign
-                    );
-
-                    portrait.lineWidth=1;
-                    portrait.strokeStyle = Wong.vermillion;
-                    portrait.fillStyle = Wong.vermillion;
-                    drawTools.circle_xy( equi, 3 );
-
-                    break;
-
-                case "NonHyperbolic":
-                    logTxt("It's (close to being) non-hyperbolic.");
-                    portrait.strokeStyle = Wong.black;
-                    portrait.fillStyle = Wong.black;
-                    drawTools.circle_xy( equi, 4 );
-                    portrait.strokeStyle = Wong.skyBlue;
-                    portrait.fillStyle = Wong.skyBlue;
-                    drawTools.circle_xy( equi, 2 );
-
-                    break;
-
-                case "Focus":
-                    if (equiInfo.stability === "stable") {
-                        logTxt("It's a stable focus.");
-                    } else {
-                        logTxt("It's an unstable focus.");
-                    }
-                    portrait.strokeStyle = Wong.reddishPurple;
-                    portrait.fillStyle= Wong.reddishPurple;
-                    drawTools.circle_xy( equi, 3 );
-
-                    break;
-
-                case "FocusOrCenter":
-                    logTxt("It's a focus or center.");
-                    portrait.strokeStyle = Wong.reddishPurple;
-                    portrait.fillStyle= Wong.reddishPurple;
-                    drawTools.circle_xy( equi, 3 );
-
-                    break;
-
-                default: // Node
-                    if (equiInfo.stability === "stable") {
-                        logTxt("It's a stable node.");
-                    } else {
-                        logTxt("It's an unstable node.");
-
-                    }
-                    portrait.strokeStyle=Wong.black;
-                    portrait.fillStyle=Wong.black;
-                    drawTools.circle_xy( equi, 3 );
+        if (zeroSet.kind === "curve") {
+            logTxt("\nThe field appears to vanish along a curve through this"
+                + " point. The equilibria are not isolated.");
+            let info = mat22.classifyEquilibrium(DfAtEqui);
+            if (info.type === "SaddleNode" && info.lam !== 0) {
+                // One eigenvalue is zero: the other one decides what happens
+                // to orbits that are not on the curve.
+                logTxt(info.lam < 0
+                    ? "Nearby orbits approach the curve."
+                    : "Nearby orbits move away from the curve.");
             }
+            let arm = mat22.scalarMul(30*pixWidth, zeroSet.dir);
+            portrait.strokeStyle = Wong.black;
+            portrait.lineWidth = 2;
+            portrait.beginPath();
+            drawTools.moveTo_xy(mat22.vectorSub(equi, arm));
+            drawTools.lineTo_xy(mat22.vectorAdd(equi, arm));
+            portrait.stroke();
+            portrait.lineWidth = 1;
+            return;
+        }
+
+        // The zero set is a single point here, so classify it
+        let equiInfo = mat22.classifyEquilibrium(DfAtEqui);
+
+        logTxt("\nFound equilibrium point at " 
+            + "(" + equi[0].toPrecision(significantDigits()).toString()
+            + ", "
+            + equi[1].toPrecision(significantDigits()).toString() + ").");
+
+        switch (equiInfo.type) {
+            case "Saddle":
+                logTxt("It's a saddle.")
+                portrait.strokeStyle=Wong.bluishGreen;
+                portrait.fillStyle=Wong.bluishGreen;
+                drawTools.circle_xy( equi, 2 );
+
+                portrait.lineWidth=1.5;
+
+                // Stable manifold
+                let displacement =  mat22.scalarMul(0.1*pixWidth, equiInfo.stableDir);
+                drawTools.integrate(
+                    mat22.vectorAdd(equi, displacement)
+                    , 10*width
+                    , -1
+                );
+                drawTools.integrate(
+                    mat22.vectorSub(equi, displacement)
+                    , 10*width
+                    , -1
+                );
+
+                // unstable manifold
+                displacement =  mat22.scalarMul(0.5*pixWidth, equiInfo.unstableDir);
+
+                drawTools.integrate(
+                    mat22.vectorAdd(equi, displacement)
+                    , 10*width
+                    , 1
+                );
+                drawTools.integrate(
+                    mat22.vectorSub(equi, displacement)
+                    , 10*width
+                    , 1
+                );
+
+                portrait.lineWidth=1;
+
+                break;
+
+            case "SaddleNode":
+                logTxt("It's (close to) non-hyperbolic, with 1D center manifold.")
+
+                portrait.strokeStyle = Wong.bluishGreen;
+                portrait.fillStyle = Wong.bluishGreen;
+                portrait.lineWidth=1.5;
+
+                // We draw the stable or unstable manifold
+                // (and ignore the center one)
+                let sign = (equiInfo.lam < 0) ? -1 : 1;
+                let displ =  mat22.scalarMul(0.1*pixWidth, equiInfo.eigenvec);
+
+                drawTools.integrate(
+                    mat22.vectorAdd(equi, displ)
+                    , 10*width
+                    , sign
+                );
+                drawTools.integrate(
+                    mat22.vectorSub(equi, displ)
+                    , 10*width
+                    , sign
+                );
+
+                portrait.lineWidth=1;
+                portrait.strokeStyle = Wong.vermillion;
+                portrait.fillStyle = Wong.vermillion;
+                drawTools.circle_xy( equi, 3 );
+
+                break;
+
+            case "NonHyperbolic":
+                logTxt("It's (close to being) non-hyperbolic.");
+                portrait.strokeStyle = Wong.black;
+                portrait.fillStyle = Wong.black;
+                drawTools.circle_xy( equi, 4 );
+                portrait.strokeStyle = Wong.skyBlue;
+                portrait.fillStyle = Wong.skyBlue;
+                drawTools.circle_xy( equi, 2 );
+
+                break;
+
+            case "Focus":
+                if (equiInfo.stability === "stable") {
+                    logTxt("It's a stable focus.");
+                } else {
+                    logTxt("It's an unstable focus.");
+                }
+                portrait.strokeStyle = Wong.reddishPurple;
+                portrait.fillStyle= Wong.reddishPurple;
+                drawTools.circle_xy( equi, 3 );
+
+                break;
+
+            case "FocusOrCenter":
+                logTxt("It's a focus or center.");
+                portrait.strokeStyle = Wong.reddishPurple;
+                portrait.fillStyle= Wong.reddishPurple;
+                drawTools.circle_xy( equi, 3 );
+
+                break;
+
+            default: // Node
+                if (equiInfo.stability === "stable") {
+                    logTxt("It's a stable node.");
+                } else {
+                    logTxt("It's an unstable node.");
+
+                }
+                portrait.strokeStyle=Wong.black;
+                portrait.fillStyle=Wong.black;
+                drawTools.circle_xy( equi, 3 );
+        }
+
+        if (zeroSet.nonLinear && equiInfo.type !== "NonHyperbolic") {
+            logTxt("Careful: across one pixel the field changes far more than"
+                + " this linearisation accounts for, so the label above says"
+                + " little about what happens at the size of the picture.");
         }
 
     }
@@ -1220,7 +1505,11 @@ let cplane = new function() {
             return (Math.abs(v[0]) > 6*width);
         }
 
-        cycle = mat22.newtonSolve(h, Dh, [t, 0], tol=pixWidth*1e-2, giveup);
+        // The residual of h is a distance, so an absolute tolerance is right
+        // here; the equilibrium search, whose residual is a field value,
+        // passes nothing and gets the scale-free default.
+        cycle = mat22.newtonSolve(h, Dh, [t, 0], pixWidth*1e-2, giveup,
+            pixWidth*1e-2);
         if (!cycle) return; 
 
         // If the diameter of the cycle is too short, we probably just found

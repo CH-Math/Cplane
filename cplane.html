@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <title>Cplane</title>
+        <link rel="stylesheet" href="style01617_bright.css">
+    </head>
+    <body>
+        <header>
+            <table id="headertable" style>
+                <tr><td>01617</td><td>Coding: Christian Henriksen</td></tr>
+                <tr><td>Introduction to Dynamical Systems</td><td>Style advice: Mipsi</td></tr>
+            </table>
+            <script src="cplane.js"></script>
+        </header>
+
+        <div class="inbody">
+
+            <h1>Cplane</h1>
+            <p>Cplane is inspired by PPlane, but written from scratch to
+            be light weight and run in the browser.
+
+            <p>It can detect and classify equilibria, and search for cycles.
+
+            <ol>
+                <li>Enter the system equations (you can change the variable names).</li>
+                <li>Define the region in the plane you'll be looking at.</li>
+                <li>Press Go!</li>
+                <li>Click on the phaseportrait to draw (a part of) an orbit.</li>
+                <li>Shift-click to search for an (isolated) equilibrium.</li>
+                <li>Ctrl-click to search for a cycle (works best if the cycle
+                    is contained in the window, and the period is not too long).</li>
+            </ol>
+            <form>
+                <h2>System</h2>
+                <input style="text-align:right;" type="text" name="var1" size=3 value="x">
+                '=
+                <input type="text" name="expr1" value="-y+a*x-x^3">
+                <br>
+                <input style="text-align:right;" type="text" name="var2" size=3 value="y">
+                '=
+                <input type="text" name="expr2" value="x-4*x*y"><br>
+                where<br>
+                <input style="text-align:right;" type="text" name="param" size=3 value="a">
+                =
+                <input type="text" name="paramval" value="0.5"><br>
+
+
+                <h2>Window</h2>
+
+                <input name="xmin" size=5 value="-2">
+                &le; <span id="range1name">x</span> &le;
+                <input name="xmax" size=5 value="2"> <br>
+
+                <input name="ymin" size=5 value="-2">
+                &le; <span id="range2name">y</span> &le;
+                <input name="ymax" size=5 value="2"> <br>
+
+                <h2>Load/Save System</h2>
+
+                <input style="text-align:left;" type="text" name="sysname" size=16 value="mysys">
+                <button type="button" id="load">load</button>
+                <button type="button" id="save">save</button>
+
+
+                <h2>Image size</h2>
+
+                  <input type="radio" id="imsmall" name="imsize" checked>
+                  <label for="small">small</label>
+
+                  <input type="radio" id="immedium" name="imsize">
+                  <label for="medium">medium</label>
+
+                  <input type="radio" id="imlarge" name="imsize">
+                  <label for="large">large</label>
+
+                  <br><br><button type="submit">Go!</button>
+            </form>
+
+            <h2>Output</h2>
+            <p>
+                <textarea id="textout" readonly 
+                    style="overflow:scroll; height:100px; width:600px;">
+                </textarea>
+            </p>
+
+            <h2>Phase portrait</h2> 
+            <p>
+                <canvas id="portrait" width="600" height="600"
+                    style="border: 1px solid #000">
+                </canvas>
+            </p>
+            <script>
+
+                var formOK = false;
+                var portraitElem=document.getElementById("portrait");
+                var textOutElem = document.getElementById("textout");
+                var form = document.querySelector("form");
+
+
+                /* Saving and loading */
+                function get_info(form) {
+                    let sysName = form.elements.sysname.value;
+                    let sysInfo = {
+                        "var1" : form.elements.var1.value,
+                        "var2" : form.elements.var2.value,
+                        "param" : form.elements.param.value,
+                        "expr1" : form.elements.expr1.value,
+                        "expr2" : form.elements.expr2.value,
+                        "paramExpr" : form.elements.paramval.value,
+                        "xmin" : form.elements.xmin.value,
+                        "xmax" : form.elements.xmax.value,
+                        "ymin" : form.elements.ymin.value,
+                        "ymax" : form.elements.ymax.value
+                    };
+                    return [sysName, sysInfo];
+                };
+
+                function set_info(form, info) {
+                    form.elements.var1.value = info.var1;
+                    form.elements.var2.value = info.var2;
+                    form.elements.param.value = info.param;
+                    form.elements.expr1.value = info.expr1;
+                    form.elements.expr2.value = info.expr2;
+                    form.elements.paramval.value = info.paramExpr;
+                    form.elements.xmin.value = info.xmin;
+                    form.elements.xmax.value = info.xmax;
+                    form.elements.ymin.value = info.ymin;
+                    form.elements.ymax.value = info.ymax;
+                };
+               
+                let saveButton = document.getElementById("save");
+                saveButton.addEventListener("click",
+                function(event) {
+                    let [sysName, sysInfo] = get_info(form);
+                    localStorage.setItem(sysName, JSON.stringify(sysInfo));
+                    /* Output to user */
+                    textOutElem = document.getElementById("textout");
+                    textOutElem.innerHTML += "\nSystem saved\n";
+                    textOutElem.scrollTop = textOutElem.scrollHeight; 
+                });
+
+                let loadButton = document.getElementById("load");
+                loadButton.addEventListener("click",
+                function(event) {
+                    let sysName = form.elements.sysname.value;
+                    let sysInfo = JSON.parse(localStorage.getItem(sysName));
+                    if (sysInfo) {                
+                        set_info(form, sysInfo);
+                        /* Output to user */
+                        textOutElem = document.getElementById("textout");
+                        textOutElem.innerHTML = "System loaded\n";
+                    } else {
+                        textOutElem = document.getElementById("textout");
+                        textOutElem.innerHTML = "Error, could not load system.\n" +
+                            "Note that saves are local to computer and browser.\n";
+                    };
+                });
+
+
+                /* Validate input and add central submit event listener */
+
+                form.addEventListener("submit", 
+                function(event) {
+                    document.getElementById("range1name").innerHTML = form.elements.var1.value;
+                    document.getElementById("range2name").innerHTML = form.elements.var2.value;
+                    let var1 = form.elements.var1.value;
+                    let var2 = form.elements.var2.value;
+                    let param = form.elements.param.value;
+                    let expr1 = form.elements.expr1.value;
+                    let expr2 = form.elements.expr2.value;
+                    let paramExpr = form.elements.paramval.value;
+                    let xmin = Number(form.elements.xmin.value);
+                    let xmax = Number(form.elements.xmax.value);
+                    let ymin = Number(form.elements.ymin.value);
+                    let ymax = Number(form.elements.ymax.value);
+
+                    // Take care of image size
+                    if (form.elements.imsize[0].checked) {
+                        portraitElem.width = 672;
+                        portraitElem.height = 636;
+                    } else if (form.elements.imsize[1].checked) {
+                        portraitElem.width = 872;
+                        portraitElem.height = 836;
+                    } else {
+                        portraitElem.width = 1272;
+                        portraitElem.height = 1236;
+                    }
+                    
+
+                    try {
+                        formOK = false; // until proven otherwise
+                        // are variable names legal?
+                        if (!var1.match(/^[a-zA-Z][a-zA-z0-9]*$/)
+                            || !var2.match(/^[a-zA-Z][a-zA-z0-9]*$/)
+                            || !param.match(/^[a-zA-Z][a-zA-z0-9]*$/) ) {
+                            throw "A variable name is not legal";
+                        }
+                        // is the window reasonable?
+                        if (!(xmin<xmax) || !(ymin<ymax)) {
+                            throw "There is a problem with the window definition.";
+                        }
+                        cplane.init(
+                            portraitElem,
+                            textOutElem,
+                            var1,
+                            var2, 
+                            param,
+                            expr1, 
+                            expr2,
+                            paramExpr,
+                            { "xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax },
+                            form.elements.sysname.value
+                        );
+                        formOK = true;
+                        document.getElementById("textout").innerHTML = "Expressions validated.\n";
+                    }
+                    catch( err ) {
+                        if (typeof err !== "string") {
+                            throw err;
+                        }
+                        document.getElementById("textout").innerHTML = err;
+                    }
+
+                    event.preventDefault(); 
+                });
+            </script>
+            
+        </div>
+
+        <footer>Last updated 2026-11-03 Christian Henriksen</footer>
+    </body>

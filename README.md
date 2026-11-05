@@ -13,6 +13,19 @@ The tool is for quick visualisation and easy deployment: one HTML page, one
 script, one stylesheet and one background image — no build step, no server,
 nothing to install.
 
+## Saving systems
+
+A system can be saved in the browser and given a name, and the saved ones are
+listed in a drop-down. They live in the browser's local storage for the page,
+which means two things: they are not visible from another browser or another
+computer, and some browsers refuse to store anything for a page opened from
+disk.
+
+Both are handled by **export**: `export this system` writes the system in the
+form to a `.json` file, and `import file` reads such a file back. A file holds
+either one system or a whole collection, and it is ordinary JSON — readable,
+diffable, and safe to edit by hand.
+
 ## Accuracy
 
 Equilibria are classified from a numerical Jacobian, and cycles are found by

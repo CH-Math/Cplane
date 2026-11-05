@@ -82,6 +82,19 @@
                 <input style="text-align:left;" type="text" name="sysname" size=16 value="mysys">
                 <button type="button" id="load">load</button>
                 <button type="button" id="save">save</button>
+                <button type="button" id="delete">delete</button>
+                <br>
+
+                <select id="savedlist">
+                    <option value="">(saved systems)</option>
+                </select>
+
+                <br>
+                <button type="button" id="exportone">export this system</button>
+                <button type="button" id="exportall">export all</button>
+                <button type="button" id="importbtn">import file</button>
+                <input type="file" id="importfile" accept=".json,application/json"
+                    style="display:none">
 
 
                 <h2>Image size</h2>
@@ -202,34 +215,368 @@
                     form.elements.ymin.value = info.ymin;
                     form.elements.ymax.value = info.ymax;
                 };
-               
+
+
+                /* --- The library of saved systems -----------------------------
+                 * The key in localStorage IS the name of the system: get_info
+                 * returns the name separately and it is not part of the stored
+                 * object.
+                 *
+                 * A stored entry is recognised by its *content*, not by its key.
+                 * Anything else on the same origin may also write to
+                 * localStorage, and a key that does not parse as a system must
+                 * not appear in the list.
+                 */
+                function is_system_info(info) {
+                    return info !== null && typeof info === "object"
+                        && typeof info.expr1 === "string"
+                        && typeof info.expr2 === "string";
+                }
+
+                function list_saved_names(storage) {
+                    let names = [];
+                    if (storage === null || storage === undefined) {
+                        return names;
+                    }
+                    let n = 0;
+                    try { n = storage.length; } catch (e) { return names; }
+                    for (let i = 0; i < n; i++) {
+                        let key = null;
+                        try { key = storage.key(i); } catch (e) { key = null; }
+                        if (key === null) { continue; }
+                        let info = null;
+                        try { info = JSON.parse(storage.getItem(key)); }
+                        catch (e) { info = null; }
+                        if (is_system_info(info)) { names.push(key); }
+                    }
+                    names.sort(function(a, b) { return a.localeCompare(b); });
+                    return names;
+                }
+
+                function collect_systems(storage) {
+                    let out = {};
+                    let names = list_saved_names(storage);
+                    for (let i = 0; i < names.length; i++) {
+                        try { out[names[i]] = JSON.parse(storage.getItem(names[i])); }
+                        catch (e) { /* already filtered out by list_saved_names */ }
+                    }
+                    return out;
+                }
+
+                /* The file is pretty-printed on purpose: it can be diffed, kept
+                 * in git and read by hand. A student who edits one by hand is
+                 * doing something we want to allow.
+                 */
+                function bundle_text(systems) {
+                    return JSON.stringify({
+                        "format" : "cplane-systems",
+                        "version" : 1,
+                        "systems" : systems
+                    }, null, 2) + "\n";
+                }
+
+                /* Accepts both a bundle and a single bare system, so that a file
+                 * written by hand — or by an older version of Cplane — still
+                 * imports. Returns { systems, skipped }; throws only when there
+                 * is nothing at all to import.
+                 */
+                function read_bundle(text, fallbackName) {
+                    let data = null;
+                    try { data = JSON.parse(text); }
+                    catch (e) { throw "That file is not valid JSON."; }
+                    let systems = {};
+                    let skipped = 0;
+                    if (data !== null && typeof data === "object"
+                        && data.systems !== null && typeof data.systems === "object") {
+                        let names = Object.keys(data.systems);
+                        for (let i = 0; i < names.length; i++) {
+                            if (is_system_info(data.systems[names[i]])) {
+                                systems[names[i]] = data.systems[names[i]];
+                            } else {
+                                skipped += 1;
+                            }
+                        }
+                    } else if (is_system_info(data)) {
+                        systems[fallbackName || "imported"] = data;
+                    } else {
+                        throw "That file does not contain a Cplane system.";
+                    }
+                    if (Object.keys(systems).length === 0) {
+                        throw "That file contained no usable systems.";
+                    }
+                    return { "systems" : systems, "skipped" : skipped };
+                }
+
+                function store_systems(storage, systems) {
+                    let count = 0;
+                    let names = Object.keys(systems);
+                    for (let i = 0; i < names.length; i++) {
+                        try {
+                            storage.setItem(names[i], JSON.stringify(systems[names[i]]));
+                            count += 1;
+                        } catch (e) { /* reported by the caller */ }
+                    }
+                    return count;
+                }
+
+                /* localStorage is not available everywhere: some browsers block
+                 * it for pages opened from disk (file://), and a window with
+                 * cookies disabled refuses to hand out the object at all. Test
+                 * by writing, not by looking.
+                 */
+                function storage_ok(storage) {
+                    if (storage === null || storage === undefined) { return false; }
+                    try {
+                        let key = "__cplane_probe__";
+                        storage.setItem(key, "1");
+                        storage.removeItem(key);
+                        return true;
+                    } catch (e) { return false; }
+                }
+
+                /* A name is a key and a file name at once. Keep it to characters
+                 * that survive both without quoting.
+                 */
+                function safe_filename(name) {
+                    let s = String(name).replace(/[^A-Za-z0-9._-]+/g, "_");
+                    s = s.replace(/^[._]+/, "");
+                    if (s === "") { s = "cplane-systems"; }
+                    return s;
+                }
+
                 let saveButton = document.getElementById("save");
+                let loadButton = document.getElementById("load");
+                let deleteButton = document.getElementById("delete");
+                let exportOneButton = document.getElementById("exportone");
+                let exportAllButton = document.getElementById("exportall");
+                let importButton = document.getElementById("importbtn");
+                let importInput = document.getElementById("importfile");
+                let savedListElem = document.getElementById("savedlist");
+
+
+                /* Writing to the output box. A textarea shows its *value*; setting
+                 * innerHTML works by accident and loses the scroll position.
+                 */
+                function write_out(text) {
+                    let out = document.getElementById("textout");
+                    out.value = String(text);
+                    out.scrollTop = out.scrollHeight;
+                }
+
+                /* The one place a dialog is asked for. If the browser blocks it
+                 * (an iframe without allow-modals, for instance) the answer is
+                 * "no", never "yes": an unanswered question must not overwrite.
+                 */
+                function ask_confirm(text) {
+                    if (typeof window.confirm !== "function") { return false; }
+                    try { return window.confirm(text) === true; }
+                    catch (e) { return false; }
+                }
+
+                const STORAGE_REFUSED =
+                    "This browser will not let Cplane store anything for this page.\n"
+                    + "That happens for pages opened from disk in some browsers.\n"
+                    + "Use 'export this system' to keep the system as a file instead.\n";
+
+                /* The storage object, or null when it cannot be written to. */
+                function usable_storage() {
+                    let store = null;
+                    try { store = window.localStorage; } catch (e) { return null; }
+                    return storage_ok(store) ? store : null;
+                }
+
+                function refresh_saved_list(chosen) {
+                    let store = null;
+                    try { store = window.localStorage; } catch (e) { store = null; }
+                    let names = list_saved_names(store);
+                    if (chosen === undefined) {
+                        chosen = form.elements.sysname.value.trim();
+                    }
+                    savedListElem.innerHTML = "";
+                    let head = document.createElement("option");
+                    head.value = "";
+                    head.textContent = (names.length === 0)
+                        ? "(no saved systems)"
+                        : "(saved systems)";
+                    savedListElem.appendChild(head);
+                    for (let i = 0; i < names.length; i++) {
+                        let opt = document.createElement("option");
+                        opt.value = names[i];
+                        opt.textContent = names[i];
+                        if (names[i] === chosen) { opt.selected = true; }
+                        savedListElem.appendChild(opt);
+                    }
+                }
+
+                function download_text(text, filename) {
+                    let blob = new Blob([text], { "type" : "application/json" });
+                    let url = URL.createObjectURL(blob);
+                    let link = document.createElement("a");
+                    link.href = url;
+                    link.download = filename;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    /* Revoking at once cancels the download in some browsers. */
+                    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+                }
+
                 saveButton.addEventListener("click",
                 function(event) {
-                    let [sysName, sysInfo] = get_info(form);
-                    localStorage.setItem(sysName, JSON.stringify(sysInfo));
-                    /* Output to user */
-                    textOutElem = document.getElementById("textout");
-                    textOutElem.innerHTML += "\nSystem saved\n";
-                    textOutElem.scrollTop = textOutElem.scrollHeight; 
+                    let sysName = form.elements.sysname.value.trim();
+                    if (sysName === "") {
+                        write_out("A saved system needs a name.\n");
+                        return;
+                    }
+                    let store = usable_storage();
+                    if (store === null) { write_out(STORAGE_REFUSED); return; }
+                    let [, sysInfo] = get_info(form);
+                    if (store.getItem(sysName) !== null
+                        && !ask_confirm("Overwrite the saved system '" + sysName + "'?")) {
+                        write_out("Not saved. The system '" + sysName
+                            + "' was left as it was.\n");
+                        return;
+                    }
+                    store.setItem(sysName, JSON.stringify(sysInfo));
+                    refresh_saved_list(sysName);
+                    write_out("System saved: " + sysName + "\n");
                 });
 
-                let loadButton = document.getElementById("load");
                 loadButton.addEventListener("click",
                 function(event) {
-                    let sysName = form.elements.sysname.value;
-                    let sysInfo = JSON.parse(localStorage.getItem(sysName));
-                    if (sysInfo) {                
+                    let sysName = form.elements.sysname.value.trim();
+                    let store = usable_storage();
+                    if (store === null) { write_out(STORAGE_REFUSED); return; }
+                    let sysInfo = null;
+                    let raw = store.getItem(sysName);
+                    if (raw !== null) {
+                        try { sysInfo = JSON.parse(raw); } catch (e) { sysInfo = null; }
+                    }
+                    if (is_system_info(sysInfo)) {
                         set_info(form, sysInfo);
-                        /* Output to user */
-                        textOutElem = document.getElementById("textout");
-                        textOutElem.innerHTML = "System loaded\n";
+                        refresh_saved_list(sysName);
+                        write_out("System loaded: " + sysName + "\n");
                     } else {
-                        textOutElem = document.getElementById("textout");
-                        textOutElem.innerHTML = "Error, could not load system.\n" +
-                            "Note that saves are local to computer and browser.\n";
-                    };
+                        write_out("Error, could not load '" + sysName + "'.\n"
+                            + "Saves are local to this computer and this browser.\n"
+                            + "Use 'import file' to load a system from a file.\n");
+                    }
                 });
+
+                deleteButton.addEventListener("click",
+                function(event) {
+                    let sysName = form.elements.sysname.value.trim();
+                    let store = usable_storage();
+                    if (store === null) { write_out(STORAGE_REFUSED); return; }
+                    if (store.getItem(sysName) === null) {
+                        write_out("There is no saved system called '" + sysName + "'.\n");
+                        return;
+                    }
+                    if (!ask_confirm("Delete the saved system '" + sysName + "'?")) {
+                        write_out("Not deleted. The system '" + sysName + "' is still there.\n");
+                        return;
+                    }
+                    store.removeItem(sysName);
+                    refresh_saved_list("");
+                    write_out("Deleted: " + sysName + "\n");
+                });
+
+                savedListElem.addEventListener("change",
+                function(event) {
+                    /* Only fills in the name. Loading stays a click of its own,
+                     * so a half-typed system is never replaced by accident. */
+                    if (savedListElem.value !== "") {
+                        form.elements.sysname.value = savedListElem.value;
+                    }
+                });
+
+                exportOneButton.addEventListener("click",
+                function(event) {
+                    let sysName = form.elements.sysname.value.trim();
+                    if (sysName === "") {
+                        write_out("Give the system a name first; it becomes the file name.\n");
+                        return;
+                    }
+                    /* The system as it stands in the form, saved or not: that is
+                     * what the user is looking at.
+                     */
+                    let [, sysInfo] = get_info(form);
+                    let systems = {};
+                    systems[sysName] = sysInfo;
+                    let filename = safe_filename(sysName) + ".json";
+                    download_text(bundle_text(systems), filename);
+                    write_out("Exported the system in the form as " + filename + "\n");
+                });
+
+                exportAllButton.addEventListener("click",
+                function(event) {
+                    let store = usable_storage();
+                    if (store === null) { write_out(STORAGE_REFUSED); return; }
+                    let systems = collect_systems(store);
+                    let count = Object.keys(systems).length;
+                    if (count === 0) {
+                        write_out("There are no saved systems to export.\n");
+                        return;
+                    }
+                    download_text(bundle_text(systems), "cplane-systems.json");
+                    write_out("Exported " + count
+                        + (count === 1 ? " system" : " systems")
+                        + " as cplane-systems.json\n");
+                });
+
+                importButton.addEventListener("click",
+                function(event) {
+                    importInput.value = "";   /* so re-picking the same file fires */
+                    importInput.click();
+                });
+
+                importInput.addEventListener("change",
+                function(event) {
+                    let file = importInput.files[0];
+                    if (!file) { return; }
+                    let reader = new FileReader();
+                    reader.onload = function() {
+                        let store = usable_storage();
+                        if (store === null) { write_out(STORAGE_REFUSED); return; }
+                        let parsed = null;
+                        try {
+                            parsed = read_bundle(String(reader.result),
+                                safe_filename(file.name.replace(/\.json$/i, "")));
+                        } catch (err) {
+                            write_out(String(err) + "\nNothing was imported.\n");
+                            return;
+                        }
+                        let names = Object.keys(parsed.systems);
+                        let existing = list_saved_names(store);
+                        let clashes = names.filter(function(name) {
+                            return existing.indexOf(name) >= 0;
+                        });
+                        if (clashes.length > 0
+                            && !ask_confirm((clashes.length === 1)
+                                ? "Overwrite the saved system '" + clashes[0] + "'?"
+                                : "Overwrite " + clashes.length + " saved systems?\n\n"
+                                    + clashes.join("\n"))) {
+                            write_out("Nothing was imported. The systems already saved"
+                                + " were kept.\n");
+                            return;
+                        }
+                        let count = store_systems(store, parsed.systems);
+                        form.elements.sysname.value = names[0];
+                        refresh_saved_list(names[0]);
+                        write_out("Imported " + count
+                            + (count === 1 ? " system" : " systems")
+                            + " from " + file.name + ".\n"
+                            + names.join(", ") + "\n"
+                            + ((parsed.skipped > 0)
+                                ? parsed.skipped + " entries were not systems and were"
+                                    + " skipped.\n"
+                                : "")
+                            + "Click 'load' to put one in the form.\n");
+                    };
+                    reader.readAsText(file);
+                });
+
+                refresh_saved_list();
 
 
                 /* Validate input and add central submit event listener */
@@ -311,13 +658,13 @@
                             form.elements.sysname.value
                         );
                         formOK = true;
-                        document.getElementById("textout").innerHTML = "Expressions validated.\n";
+                        write_out("Expressions validated.\n");
                     }
                     catch( err ) {
                         if (typeof err !== "string") {
                             throw err;
                         }
-                        document.getElementById("textout").innerHTML = err;
+                        write_out(err);
                     }
 
                     event.preventDefault(); 
@@ -326,5 +673,6 @@
             
         </div>
 
-        <footer>Last updated 2026-11-04 Christian Henriksen</footer>
+        <footer>Last updated 2026-11-05 Christian Henriksen</footer>
     </body>
+</html>

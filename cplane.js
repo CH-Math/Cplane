@@ -608,12 +608,12 @@ let cplane = new function() {
      * We log to the element textOutElem, stored in a global variable of 
      * same name. */
     function logTxt(txt) {
-        // We append a newline
-        textOutElem.innerHTML = textOutElem.innerHTML + txt + "\n";
+        // Append the new text and a newline to the value property
+        textOutElem.value += txt + "\n";
+        
         // Scroll to bottom
-        textOutElem.scrollTop = textOutElem.scrollHeight; 
+        textOutElem.scrollTop = textOutElem.scrollHeight;
     }
-
 
     /* 2D vectors and 2 by 2 matrices 
       We implement 2D vectors as array V = [v1, v2]
